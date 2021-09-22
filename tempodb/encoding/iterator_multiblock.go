@@ -96,6 +96,7 @@ func (i *multiblockIterator) iterate(ctx context.Context) {
 		var lowestID []byte
 		var lowestObject []byte
 		var lowestBookmark *bookmark
+		var wasEverCombined bool
 
 		// find lowest ID of the new object
 		for _, b := range i.bookmarks {
@@ -110,7 +111,11 @@ func (i *multiblockIterator) iterate(ctx context.Context) {
 			comparison := bytes.Compare(currentID, lowestID)
 
 			if comparison == 0 {
-				lowestObject, _ = i.combiner.Combine(i.dataEncoding, currentObject, lowestObject)
+				var wasCombined bool
+				lowestObject, wasCombined = i.combiner.Combine(i.dataEncoding, currentObject, lowestObject)
+				if !wasEverCombined && wasCombined {
+					wasEverCombined = true
+				}
 				b.clear()
 			} else if len(lowestID) == 0 || comparison == -1 {
 				lowestID = currentID
@@ -124,10 +129,19 @@ func (i *multiblockIterator) iterate(ctx context.Context) {
 			return
 		}
 
+		// if wasEverCombined is true, that means at some point in the chain lowestObject was
+		// marshalled into a new byte array as a combination of two messages. At this point,
+		// lowestObject has already exited the iterator, and this will continue to be the case
+		// until iteration is complete. This assumption could break down if (somehow) lowestObject
+		// failed to marshall while combining, as it will be replaced with the LHS object.
+		obj := lowestObject
+		if !wasEverCombined {
+			obj = append([]byte(nil), lowestObject...)
+		}
 		// Copy slices allows data to escape the iterators
 		res := iteratorResult{
 			id:     append([]byte(nil), lowestID...),
-			object: append([]byte(nil), lowestObject...),
+			object: obj,
 		}
 
 		lowestBookmark.clear()
