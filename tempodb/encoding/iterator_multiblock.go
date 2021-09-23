@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/grafana/tempo/tempodb"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"hash/fnv"
 	"io"
 
 	"github.com/grafana/tempo/tempodb/encoding/common"
@@ -11,8 +15,18 @@ import (
 	"github.com/uber-go/atomic"
 )
 
+
+
+var (
+	metricMultiBlockIteratorResultsSent = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "tempodb",
+		Name:      "compaction_mbi_results_sent",
+		Help:      "Total number of results returned from the multiblock iterator.",
+	}, []string{})
+)
+
 type multiblockIterator struct {
-	combiner     common.ObjectCombiner
+	combiner     func() ObjectMerger
 	bookmarks    []*bookmark
 	dataEncoding string
 	resultsCh    chan iteratorResult
@@ -29,7 +43,7 @@ type iteratorResult struct {
 
 // NewMultiblockIterator Creates a new multiblock iterator. Iterates concurrently in a separate goroutine and results are buffered.
 // Traces are deduped and combined using the object combiner.
-func NewMultiblockIterator(ctx context.Context, inputs []Iterator, bufferSize int, combiner common.ObjectCombiner, dataEncoding string) Iterator {
+func NewMultiblockIterator(ctx context.Context, inputs []Iterator, bufferSize int, combiner func() ObjectMerger, dataEncoding string) Iterator {
 	i := multiblockIterator{
 		combiner:     combiner,
 		dataEncoding: dataEncoding,
@@ -88,9 +102,50 @@ func (i *multiblockIterator) allDone(ctx context.Context) bool {
 	}
 	return true
 }
+type cursor struct {
+	id common.ID
+	obj []byte
+}
 
 func (i *multiblockIterator) iterate(ctx context.Context) {
 	defer close(i.resultsCh)
+
+	rem := len(i.bookmarks)
+	for rem > 0 {
+		cursors := make(map[string][]cursor, rem)
+
+		var nextID []byte
+		for _, b := range i.bookmarks {
+			id, obj, err := b.current(ctx)
+			if err != nil { // `done`
+				rem--
+				if err == io.EOF {
+					continue
+				}
+				// unrecoverable error? seems like there should be some inline handling here
+				i.err.Store(err)
+				return
+			}
+			cursors[string(id)] = append(cursors[string(id)], cursor{
+				id: id,
+				obj: obj,
+			})
+			// first iteration
+			if nextID == nil {
+				nextID = id
+				continue
+			}
+			comparison := bytes.Compare(id, nextID)
+			if comparison == -1 {
+				nextID = id
+			}
+		}
+
+		// all bookmarks now have a representative cursor, and all common.ID's have a slice
+		for _, b := range cursors {
+
+		}
+	}
 
 	for !i.allDone(ctx) {
 		var lowestID []byte
@@ -109,7 +164,6 @@ func (i *multiblockIterator) iterate(ctx context.Context) {
 			}
 
 			comparison := bytes.Compare(currentID, lowestID)
-
 			if comparison == 0 {
 				var wasCombined bool
 				lowestObject, wasCombined = i.combiner.Combine(i.dataEncoding, currentObject, lowestObject)
@@ -121,6 +175,7 @@ func (i *multiblockIterator) iterate(ctx context.Context) {
 				lowestID = currentID
 				lowestObject = currentObject
 				lowestBookmark = b
+				wasEverCombined = false
 			}
 		}
 
@@ -157,6 +212,7 @@ func (i *multiblockIterator) iterate(ctx context.Context) {
 			return
 
 		case i.resultsCh <- res:
+			metricMultiBlockIteratorResultsSent
 			// Send results. Blocks until available buffer in channel
 			// created by receiving in Next()
 		}
@@ -186,17 +242,27 @@ func (b *bookmark) current(ctx context.Context) ([]byte, []byte, error) {
 		return nil, nil, b.currentErr
 	}
 
-	b.currentID, b.currentObject, b.currentErr = b.iter.Next(ctx)
-	return b.currentID, b.currentObject, b.currentErr
+	// bookmark is empty, initialize it
+	return b.next(ctx)
 }
 
 func (b *bookmark) done(ctx context.Context) bool {
 	_, _, err := b.current(ctx)
 
-	return err != nil
+	return err != v
+}
+
+func (b *bookmark) next(ctx context.Context) ([]byte, []byte, error) {
+	b.currentID, b.currentObject, b.currentErr = b.iter.Next(ctx)
+	return b.currentID, b.currentObject, b.currentErr
 }
 
 func (b *bookmark) clear() {
 	b.currentID = nil
 	b.currentObject = nil
+}
+
+
+type traceReducer struct {
+
 }
