@@ -94,8 +94,8 @@ func (i *multiblockIterator) iterate(ctx context.Context) {
 
 	for !i.allDone(ctx) {
 		var lowestID []byte
-		var lowestObject []byte
-		var lowestBookmark *bookmark
+		var lowestObjects [][]byte
+		var lowestBookmarks []*bookmark
 
 		// find lowest ID of the new object
 		for _, b := range i.bookmarks {
@@ -110,16 +110,24 @@ func (i *multiblockIterator) iterate(ctx context.Context) {
 			comparison := bytes.Compare(currentID, lowestID)
 
 			if comparison == 0 {
-				lowestObject, _ = i.combiner.Combine(i.dataEncoding, currentObject, lowestObject)
-				b.clear()
+				lowestObjects = append(lowestObjects, currentObject)
+				lowestBookmarks = append(lowestBookmarks, b)
 			} else if len(lowestID) == 0 || comparison == -1 {
 				lowestID = currentID
-				lowestObject = currentObject
-				lowestBookmark = b
+				lowestObjects = [][]byte{currentObject}
+				lowestBookmarks = [][]*bookmark{b}
 			}
 		}
 
-		if len(lowestID) == 0 || len(lowestObject) == 0 || lowestBookmark == nil {
+		var lowestObject []byte
+		if len(lowestID) != 0 {
+			lowestObject, _ = i.combiner.Combine(i.dataEncoding, lowestObjects...)
+			for _, b := range lowestBookmarks {
+				b.clear()
+			}
+		}
+
+		if len(lowestID) == 0 || len(lowestObject) == 0 {
 			i.err.Store(errors.New("failed to find a lowest object in compaction"))
 			return
 		}
@@ -129,8 +137,6 @@ func (i *multiblockIterator) iterate(ctx context.Context) {
 			id:     append([]byte(nil), lowestID...),
 			object: append([]byte(nil), lowestObject...),
 		}
-
-		lowestBookmark.clear()
 
 		select {
 
