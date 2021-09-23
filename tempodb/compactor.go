@@ -176,12 +176,24 @@ func (rw *readerWriter) compact(blockMetas []*backend.BlockMeta, tenantID string
 	var currentBlock *encoding.StreamingBlock
 	var tracker backend.AppendTracker
 
-	combiner := instrumentedObjectCombiner{
-		inner:                rw.compactorSharder,
-		compactionLevelLabel: compactionLevelLabel,
-	}
 
-	iter := encoding.NewMultiblockIterator(ctx, iters, rw.compactorCfg.IteratorBufferSize, combiner, dataEncoding)
+	var iter encoding.Iterator
+	useDenseIterator := true
+	if useDenseIterator {
+		iter = encoding.NewDenseMultiblockIterator(ctx, iters, rw.compactorCfg.IteratorBufferSize, func(id common.ID) encoding.ObjectMerger {
+			return instrumentedObjectMerger{
+				ObjectMerger:         encoding.NewMerger(id),
+				compactionLevelLabel: compactionLevelLabel,
+			}
+
+		}, dataEncoding)
+	} else {
+		combiner := instrumentedObjectCombiner{
+			inner:                rw.compactorSharder,
+			compactionLevelLabel: compactionLevelLabel,
+		}
+		iter = encoding.NewMultiblockIterator(ctx, iters, rw.compactorCfg.IteratorBufferSize, combiner, dataEncoding)
+	}
 	defer iter.Close()
 
 	for {
@@ -320,4 +332,18 @@ func (i instrumentedObjectCombiner) Combine(dataEncoding string, objs ...[]byte)
 		metricCompactionObjectsCombined.WithLabelValues(i.compactionLevelLabel).Inc()
 	}
 	return b, wasCombined
+}
+
+
+type instrumentedObjectMerger struct {
+	encoding.ObjectMerger
+	compactionLevelLabel string
+}
+
+func (i instrumentedObjectMerger) Merge(dataEncoding string, objs ...[]byte) (bool, error) {
+	wasCombined, err := i.ObjectMerger.Merge(dataEncoding, objs...)
+	if wasCombined {
+		metricCompactionObjectsCombined.WithLabelValues(i.compactionLevelLabel).Inc()
+	}
+	return wasCombined, err
 }

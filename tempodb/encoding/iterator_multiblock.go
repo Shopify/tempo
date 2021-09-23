@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/grafana/tempo/tempodb"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"hash/fnv"
 	"io"
 
 	"github.com/grafana/tempo/tempodb/encoding/common"
@@ -15,18 +13,21 @@ import (
 	"github.com/uber-go/atomic"
 )
 
-
-
 var (
 	metricMultiBlockIteratorResultsSent = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "tempodb",
 		Name:      "compaction_mbi_results_sent",
 		Help:      "Total number of results returned from the multiblock iterator.",
 	}, []string{})
+	metricMultiBlockIteratorWorkDropped = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "tempodb",
+		Name:      "compaction_mbi_results_dropped",
+		Help:      "The amount of spans that were processed but dropped",
+	}, []string{})
 )
 
 type multiblockIterator struct {
-	combiner     func() ObjectMerger
+	combiner     common.ObjectCombiner
 	bookmarks    []*bookmark
 	dataEncoding string
 	resultsCh    chan iteratorResult
@@ -43,7 +44,7 @@ type iteratorResult struct {
 
 // NewMultiblockIterator Creates a new multiblock iterator. Iterates concurrently in a separate goroutine and results are buffered.
 // Traces are deduped and combined using the object combiner.
-func NewMultiblockIterator(ctx context.Context, inputs []Iterator, bufferSize int, combiner func() ObjectMerger, dataEncoding string) Iterator {
+func NewMultiblockIterator(ctx context.Context, inputs []Iterator, bufferSize int, combiner common.ObjectCombiner, dataEncoding string) Iterator {
 	i := multiblockIterator{
 		combiner:     combiner,
 		dataEncoding: dataEncoding,
@@ -102,58 +103,17 @@ func (i *multiblockIterator) allDone(ctx context.Context) bool {
 	}
 	return true
 }
-type cursor struct {
-	id common.ID
-	obj []byte
-}
 
 func (i *multiblockIterator) iterate(ctx context.Context) {
 	defer close(i.resultsCh)
-
-	rem := len(i.bookmarks)
-	for rem > 0 {
-		cursors := make(map[string][]cursor, rem)
-
-		var nextID []byte
-		for _, b := range i.bookmarks {
-			id, obj, err := b.current(ctx)
-			if err != nil { // `done`
-				rem--
-				if err == io.EOF {
-					continue
-				}
-				// unrecoverable error? seems like there should be some inline handling here
-				i.err.Store(err)
-				return
-			}
-			cursors[string(id)] = append(cursors[string(id)], cursor{
-				id: id,
-				obj: obj,
-			})
-			// first iteration
-			if nextID == nil {
-				nextID = id
-				continue
-			}
-			comparison := bytes.Compare(id, nextID)
-			if comparison == -1 {
-				nextID = id
-			}
-		}
-
-		// all bookmarks now have a representative cursor, and all common.ID's have a slice
-		for _, b := range cursors {
-
-		}
-	}
 
 	for !i.allDone(ctx) {
 		var lowestID []byte
 		var lowestObject []byte
 		var lowestBookmark *bookmark
-		var wasEverCombined bool
 
 		// find lowest ID of the new object
+		var count int
 		for _, b := range i.bookmarks {
 			currentID, currentObject, err := b.current(ctx)
 			if err == io.EOF {
@@ -164,18 +124,17 @@ func (i *multiblockIterator) iterate(ctx context.Context) {
 			}
 
 			comparison := bytes.Compare(currentID, lowestID)
+
 			if comparison == 0 {
-				var wasCombined bool
-				lowestObject, wasCombined = i.combiner.Combine(i.dataEncoding, currentObject, lowestObject)
-				if !wasEverCombined && wasCombined {
-					wasEverCombined = true
-				}
+				lowestObject, _ = i.combiner.Combine(i.dataEncoding, currentObject, lowestObject)
 				b.clear()
+				count++
 			} else if len(lowestID) == 0 || comparison == -1 {
+				metricMultiBlockIteratorWorkDropped.With(nil).Add(float64(count))
+				count = 0
 				lowestID = currentID
 				lowestObject = currentObject
 				lowestBookmark = b
-				wasEverCombined = false
 			}
 		}
 
@@ -184,19 +143,10 @@ func (i *multiblockIterator) iterate(ctx context.Context) {
 			return
 		}
 
-		// if wasEverCombined is true, that means at some point in the chain lowestObject was
-		// marshalled into a new byte array as a combination of two messages. At this point,
-		// lowestObject has already exited the iterator, and this will continue to be the case
-		// until iteration is complete. This assumption could break down if (somehow) lowestObject
-		// failed to marshall while combining, as it will be replaced with the LHS object.
-		obj := lowestObject
-		if !wasEverCombined {
-			obj = append([]byte(nil), lowestObject...)
-		}
 		// Copy slices allows data to escape the iterators
 		res := iteratorResult{
 			id:     append([]byte(nil), lowestID...),
-			object: obj,
+			object: append([]byte(nil), lowestObject...),
 		}
 
 		lowestBookmark.clear()
@@ -212,7 +162,6 @@ func (i *multiblockIterator) iterate(ctx context.Context) {
 			return
 
 		case i.resultsCh <- res:
-			metricMultiBlockIteratorResultsSent
 			// Send results. Blocks until available buffer in channel
 			// created by receiving in Next()
 		}
@@ -242,27 +191,17 @@ func (b *bookmark) current(ctx context.Context) ([]byte, []byte, error) {
 		return nil, nil, b.currentErr
 	}
 
-	// bookmark is empty, initialize it
-	return b.next(ctx)
+	b.currentID, b.currentObject, b.currentErr = b.iter.Next(ctx)
+	return b.currentID, b.currentObject, b.currentErr
 }
 
 func (b *bookmark) done(ctx context.Context) bool {
 	_, _, err := b.current(ctx)
 
-	return err != v
-}
-
-func (b *bookmark) next(ctx context.Context) ([]byte, []byte, error) {
-	b.currentID, b.currentObject, b.currentErr = b.iter.Next(ctx)
-	return b.currentID, b.currentObject, b.currentErr
+	return err != nil
 }
 
 func (b *bookmark) clear() {
 	b.currentID = nil
 	b.currentObject = nil
-}
-
-
-type traceReducer struct {
-
 }

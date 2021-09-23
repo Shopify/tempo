@@ -3,6 +3,7 @@ package common
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"io"
 )
 
@@ -14,6 +15,12 @@ var (
 
 // ID in TempoDB
 type ID []byte
+
+func (i ID) Hash() {
+	f := fnv.New32a()
+	f.Write(i)
+	f.Sum32()
+}
 
 // Record represents the location of an ID in an object file
 type Record struct {

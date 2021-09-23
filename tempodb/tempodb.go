@@ -88,6 +88,8 @@ type CompactorSharder interface {
 	Owns(hash string) bool
 }
 
+type CombinerFn func(hash string, )
+
 type CompactorOverrides interface {
 	BlockRetentionForTenant(tenantID string) time.Duration
 }
