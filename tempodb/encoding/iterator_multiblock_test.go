@@ -81,7 +81,7 @@ func TestMultiblockSorts(t *testing.T) {
 	iterOdds.Add([]byte{3}, []byte{3}, nil)
 	iterOdds.Add([]byte{5}, []byte{5}, nil)
 
-	iter := NewMultiblockIterator(context.TODO(), []Iterator{iterEvens, iterOdds}, 10, nil, "")
+	iter := NewMultiblockIterator(context.TODO(), []Iterator{iterEvens, iterOdds}, 10, "", "", NewMerger)
 
 	count := 0
 	lastID := -1
@@ -132,7 +132,7 @@ func TestMultiblockIteratorCanBeCancelled(t *testing.T) {
 			ctx, cancel := context.WithCancel(ctx)
 
 			// Create iterator and cancel/close it after 100ms
-			iter := NewMultiblockIterator(ctx, []Iterator{inner}, recordCount/2, nil, "")
+			iter := NewMultiblockIterator(ctx, []Iterator{inner}, recordCount/2, "", "", NewMerger)
 			time.Sleep(100 * time.Millisecond)
 			if tc.close {
 				iter.Close()
@@ -160,7 +160,7 @@ func TestMultiblockIteratorCanBeCancelled(t *testing.T) {
 func TestMultiblockIteratorCanBeCancelledMultipleTimes(t *testing.T) {
 	inner := &testIterator{}
 
-	iter := NewMultiblockIterator(context.TODO(), []Iterator{inner}, 1, nil, "")
+	iter := NewMultiblockIterator(context.TODO(), []Iterator{inner}, 1, "", "", NewMerger)
 
 	iter.Close()
 	iter.Close()
@@ -178,7 +178,7 @@ func TestMultiblockIteratorPropogatesErrors(t *testing.T) {
 	inner2.Add([]byte{2}, []byte{2}, nil)
 	inner2.Add([]byte{3}, []byte{3}, nil)
 
-	iter := NewMultiblockIterator(ctx, []Iterator{inner, inner2}, 10, nil, "")
+	iter := NewMultiblockIterator(ctx, []Iterator{inner, inner2}, 10, "", "", NewMerger)
 
 	_, _, err := iter.Next(ctx)
 	require.NoError(t, err)
