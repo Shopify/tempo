@@ -9,15 +9,15 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/pkg/errors"
-
 	"github.com/go-kit/kit/log/level"
 	"github.com/google/uuid"
-	"github.com/grafana/tempo/tempodb/backend"
-	"github.com/grafana/tempo/tempodb/encoding"
-	"github.com/grafana/tempo/tempodb/encoding/common"
+	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/grafana/tempo/pkg/model"
+	"github.com/grafana/tempo/tempodb/backend"
+	"github.com/grafana/tempo/tempodb/encoding"
 )
 
 var (
@@ -45,6 +45,11 @@ var (
 		Namespace: "tempodb",
 		Name:      "compaction_objects_combined_total",
 		Help:      "Total number of objects combined during compaction.",
+	}, []string{"level"})
+	metricCompactionObjectsSkipped = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "tempodb",
+		Name:      "compaction_objects_skipped_total",
+		Help:      "Total number of objects that were passed due to error or duplication.",
 	}, []string{"level"})
 )
 
@@ -171,17 +176,18 @@ func (rw *readerWriter) compact(blockMetas []*backend.BlockMeta, tenantID string
 		iters = append(iters, iter)
 	}
 
-	recordsPerBlock := (totalRecords / outputBlocks)
+	recordsPerBlock := totalRecords / outputBlocks
 	var newCompactedBlocks []*backend.BlockMeta
 	var currentBlock *encoding.StreamingBlock
 	var tracker backend.AppendTracker
 
-	combiner := instrumentedObjectCombiner{
-		inner:                rw.compactorSharder,
-		compactionLevelLabel: compactionLevelLabel,
-	}
-
-	iter := encoding.NewMultiblockIterator(ctx, iters, rw.compactorCfg.IteratorBufferSize, combiner, dataEncoding)
+	iter := encoding.NewMultiblockIterator(ctx, iters, rw.compactorCfg.IteratorBufferSize, dataEncoding, compactionLevelLabel,
+		func(encoding string, id []byte, initial []byte) model.ObjectMerger {
+			return &instrumentedObjectMerger{
+				ObjectMerger:         model.NewMerger(encoding, id, initial),
+				compactionLevelLabel: compactionLevelLabel,
+			}
+		})
 	defer iter.Close()
 
 	for {
@@ -308,16 +314,14 @@ func markCompacted(rw *readerWriter, tenantID string, oldBlocks []*backend.Block
 	rw.blocklist.Update(tenantID, newBlocks, oldBlocks, newCompactions)
 }
 
-type instrumentedObjectCombiner struct {
+type instrumentedObjectMerger struct {
+	model.ObjectMerger
 	compactionLevelLabel string
-	inner                common.ObjectCombiner
 }
 
-// Combine wraps the inner combiner with combined metrics
-func (i instrumentedObjectCombiner) Combine(dataEncoding string, objs ...[]byte) ([]byte, bool) {
-	b, wasCombined := i.inner.Combine(dataEncoding, objs...)
-	if wasCombined {
-		metricCompactionObjectsCombined.WithLabelValues(i.compactionLevelLabel).Inc()
-	}
-	return b, wasCombined
+func (i instrumentedObjectMerger) Merge(dataEncoding string, objs ...[]byte) (int, error) {
+	mergeCount, err := i.ObjectMerger.Merge(dataEncoding, objs...)
+	metricCompactionObjectsCombined.WithLabelValues(i.compactionLevelLabel).Add(float64(mergeCount))
+	metricCompactionObjectsSkipped.WithLabelValues(i.compactionLevelLabel).Add(float64(len(objs) - mergeCount))
+	return mergeCount, err
 }
