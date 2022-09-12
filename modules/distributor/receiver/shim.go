@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"contrib.go.opencensus.io/exporter/prometheus"
+	"github.com/Shopify/opentelemetry-collector-shopify/receiver/googlecloudpubsublitereceiver"
 	"github.com/go-kit/log/level"
 	"github.com/grafana/dskit/services"
 	zaplogfmt "github.com/jsternberg/zap-logfmt"
@@ -91,6 +92,7 @@ func New(receiverCfg map[string]interface{}, pusher BatchPusher, middleware Midd
 		opencensusreceiver.NewFactory(),
 		otlpreceiver.NewFactory(),
 		kafkareceiver.NewFactory(),
+		googlecloudpubsublitereceiver.NewFactory(),
 	)
 	if err != nil {
 		return nil, err
