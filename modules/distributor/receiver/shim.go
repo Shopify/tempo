@@ -207,6 +207,7 @@ func (r *receiversShim) ConsumeTraces(ctx context.Context, td pdata.Traces) erro
 // implements component.Host
 func (r *receiversShim) ReportFatalError(err error) {
 	level.Error(log.Logger).Log("msg", "fatal error reported", "err", err)
+	panic(err)
 }
 
 // implements component.Host
