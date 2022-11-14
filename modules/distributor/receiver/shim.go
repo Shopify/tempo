@@ -65,6 +65,7 @@ type receiversShim struct {
 	pusher      BatchPusher
 	logger      *log.RateLimitedLogger
 	metricViews []*view.View
+	fatal       chan error
 }
 
 func (r *receiversShim) Capabilities() consumer.Capabilities {
@@ -75,6 +76,7 @@ func New(receiverCfg map[string]interface{}, pusher BatchPusher, middleware Midd
 	shim := &receiversShim{
 		pusher: pusher,
 		logger: log.NewRateLimitedLogger(logsPerSecond, level.Error(log.Logger)),
+		fatal:  make(chan error),
 	}
 
 	// shim otel observability
@@ -130,10 +132,20 @@ func New(receiverCfg map[string]interface{}, pusher BatchPusher, middleware Midd
 		shim.receivers = append(shim.receivers, receiver)
 	}
 
-	shim.Service = services.NewIdleService(shim.starting, shim.stopping)
+	shim.Service = services.NewBasicService(shim.starting, shim.running, shim.stopping)
 
 	return shim, nil
 }
+
+func (r *receiversShim) running(ctx context.Context) error {
+	select {
+	case err := <-r.fatal:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (r *receiversShim) starting(ctx context.Context) error {
 	for _, receiver := range r.receivers {
 		err := receiver.Start(ctx, r)
@@ -207,6 +219,7 @@ func (r *receiversShim) ConsumeTraces(ctx context.Context, td pdata.Traces) erro
 // implements component.Host
 func (r *receiversShim) ReportFatalError(err error) {
 	level.Error(log.Logger).Log("msg", "fatal error reported", "err", err)
+	r.fatal <- err
 }
 
 // implements component.Host
